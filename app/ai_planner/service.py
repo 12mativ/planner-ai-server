@@ -11,7 +11,10 @@ from app.ai_planner.models import (
     TeamMember,
     ProjectContext,
     GeneratedTask,
-    GeneratedPlan
+    GeneratedPlan,
+    Worker,
+    TaskToAssign,
+    AssignmentResult,
 )
 
 
@@ -267,4 +270,106 @@ class AIPlannerService:
 
         except Exception as e:
             print(f"Error refining project plan: {e}")
+            raise
+
+    def assign_tasks(
+        self,
+        workers: List[Worker],
+        tasks: List[TaskToAssign]
+    ) -> AssignmentResult:
+        """
+        Assign tasks to workers based on their roles, skills, and current workload.
+
+        Args:
+            workers: List of workers with their current task lists
+            tasks: List of tasks that need to be assigned
+
+        Returns:
+            AssignmentResult with one assignment per task and overall reasoning
+        """
+
+        workers_info = []
+        for w in workers:
+            busy_hours = sum(t.estimated_hours for t in w.current_tasks)
+            task_lines = "\n".join(
+                f"    • {t.title} ({t.estimated_hours}ч, {t.priority})"
+                for t in w.current_tasks
+            ) or "    (нет текущих задач)"
+            capacity = (
+                f"{w.available_hours_per_week}ч/нед доступно"
+                if w.available_hours_per_week is not None
+                else "доступность не указана"
+            )
+            workers_info.append(
+                f"Работник: {w.name} (ID: {w.id})\n"
+                f"  Роль: {w.role}\n"
+                f"  Текущая нагрузка: {busy_hours}ч\n"
+                f"  Доступность: {capacity}\n"
+                f"  Текущие задачи:\n{task_lines}"
+            )
+
+        tasks_info = []
+        for t in tasks:
+            tags = ", ".join(t.tags) if t.tags else "—"
+            hours = f"{t.estimated_hours}ч" if t.estimated_hours else "не указано"
+            tasks_info.append(
+                f"Задача ID: {t.id}\n"
+                f"  Название: {t.title}\n"
+                f"  Описание: {t.description}\n"
+                f"  Приоритет: {t.priority}\n"
+                f"  Оценка: {hours}\n"
+                f"  Теги: {tags}"
+            )
+
+        assignment_system_prompt = (
+            "Ты — опытный тимлид. Твоя задача — распределить задачи между работниками "
+            "с учётом их ролей, навыков и текущей загруженности.\n\n"
+            "ПРАВИЛА:\n"
+            "1. Назначай задачу тому, чья роль/навыки наиболее подходят\n"
+            "2. Учитывай текущую нагрузку: не перегружай занятых работников\n"
+            "3. Каждая задача должна быть назначена ровно одному работнику\n"
+            "4. Используй только ID работников из списка\n\n"
+            "ФОРМАТ ОТВЕТА (строго JSON):\n"
+            "{\n"
+            '  "assignments": [\n'
+            "    {\n"
+            '      "taskId": "id задачи",\n'
+            '      "workerId": "id работника",\n'
+            '      "reasoning": "краткое обоснование выбора"\n'
+            "    }\n"
+            "  ],\n"
+            '  "reasoning": "общая стратегия распределения задач"\n'
+            "}"
+        )
+
+        user_prompt = (
+            "РАБОТНИКИ:\n"
+            + "\n\n".join(workers_info)
+            + "\n\nЗАДАЧИ ДЛЯ РАСПРЕДЕЛЕНИЯ:\n"
+            + "\n\n".join(tasks_info)
+            + "\n\nРаспредели задачи между работниками."
+        )
+
+        messages = [
+            {"role": "system", "content": assignment_system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            response_data = self._make_api_request(messages)
+
+            if "response" in response_data:
+                content = response_data["response"]["choices"][0]["message"]["content"]
+            else:
+                content = response_data.get("choices", [{}])[0].get("message", {}).get("content")
+
+            if not content:
+                raise ValueError("Пустой ответ от API")
+
+            data = json.loads(content)
+            workers_by_id = {w.id: w.name for w in workers}
+            return AssignmentResult.from_dict(data, workers_by_id)
+
+        except Exception as e:
+            print(f"Error assigning tasks: {e}")
             raise

@@ -7,7 +7,7 @@ from flask import Blueprint, request, Response
 import json
 from typing import List, Dict, Any
 from app.ai_planner.service import AIPlannerService
-from app.ai_planner.models import TeamMember, ProjectContext, GeneratedPlan
+from app.ai_planner.models import TeamMember, ProjectContext, GeneratedPlan, Worker, TaskToAssign
 
 
 ai_planner_bp = Blueprint("ai_planner", __name__)
@@ -213,6 +213,71 @@ def refine_plan():
             {"error": f"Internal error: {str(e)}"},
             status=500
         )
+
+
+@ai_planner_bp.route("/ai-planner/assign", methods=["POST"])
+def assign_tasks():
+    """
+    Assign tasks to workers based on roles and current workload.
+
+    Expected JSON body:
+    {
+        "workers": [
+            {
+                "id": "string",
+                "name": "string",
+                "role": "string",
+                "availableHoursPerWeek": number (optional),
+                "currentTasks": [
+                    {
+                        "title": "string",
+                        "estimatedHours": number,
+                        "priority": "low|medium|high|critical"
+                    }
+                ]
+            }
+        ],
+        "tasksToAssign": [
+            {
+                "id": "string",
+                "title": "string",
+                "description": "string",
+                "estimatedHours": number (optional),
+                "priority": "low|medium|high|critical",
+                "tags": ["string"]
+            }
+        ]
+    }
+    """
+    try:
+        data = request.get_json(force=True, silent=True)
+
+        if not data:
+            return _create_response({"error": "Invalid JSON body"}, status=400)
+
+        if "workers" not in data or not isinstance(data["workers"], list):
+            return _create_response({"error": "Missing or invalid 'workers'"}, status=400)
+
+        if "tasksToAssign" not in data or not isinstance(data["tasksToAssign"], list):
+            return _create_response({"error": "Missing or invalid 'tasksToAssign'"}, status=400)
+
+        if not data["tasksToAssign"]:
+            return _create_response({"error": "'tasksToAssign' must not be empty"}, status=400)
+
+        if not data["workers"]:
+            return _create_response({"error": "'workers' must not be empty"}, status=400)
+
+        workers = [Worker.from_dict(w) for w in data["workers"]]
+        tasks = [TaskToAssign.from_dict(t) for t in data["tasksToAssign"]]
+
+        result = _get_planner_service().assign_tasks(workers=workers, tasks=tasks)
+
+        return _create_response({"success": True, "result": result.to_dict()})
+
+    except ValueError as e:
+        return _create_response({"error": f"Validation error: {str(e)}"}, status=400)
+    except Exception as e:
+        return _create_response({"error": f"Internal error: {str(e)}"}, status=500)
 
 
 @ai_planner_bp.route("/ai-planner/health", methods=["GET"])
